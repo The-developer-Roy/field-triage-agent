@@ -44,7 +44,6 @@ Report:
 
   const data = await res.json();
 
-  // Default fallback
   let parsed: LLMResult = {
     severity: "Minor",
     category: "General",
@@ -52,11 +51,8 @@ Report:
   };
 
   try {
-    // ✅ Gemini returns text here
     const rawText =
       data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
-
-    // ✅ Extract JSON safely even if Gemini adds extra text
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const obj = JSON.parse(jsonMatch[0]);
@@ -79,6 +75,40 @@ Report:
   return parsed;
 }
 
+// ---------------- Composio helper ----------------
+const COMPOSIO_API_KEY = process.env.COMPOSIO_API_KEY!;
+
+async function executeComposioTool(
+  toolSlug: string,
+  inputArgs: Record<string, any>,
+  userId: string
+) {
+  // Use the documented endpoint:
+  const url = `https://backend.composio.dev/api/v3/tools/execute/${toolSlug}`;
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.COMPOSIO_API_KEY!,
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      arguments: inputArgs,
+      // or you could use `text` instead of `arguments` for natural-language requests
+    }),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Composio execute error: ${resp.status} ${txt}`);
+  }
+
+  const data = await resp.json();
+  return data;
+}
+
+// ---------------- API Handler ----------------
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -93,57 +123,52 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Run classification via Gemini
+    // 1️⃣ Classify report via Gemini
     const llmData = await classifyWithGemini(report);
-    console.log(llmData);
+    console.log("LLM Classification:", llmData);
 
-    const key = process.env.TRELLO_API_KEY!;
-    const token = process.env.TRELLO_TOKEN!;
-    const listId = process.env.TRELLO_LIST_ID!;
+    // 2️⃣ Prepare input for Composio (Trello workflow)
+    const trelloInput: any = {
+      idList: process.env.TRELLO_LIST_ID!,
+      name: `[${llmData.severity} - ${llmData.category}] ${llmData.title}`,
+      desc: machineId ? `${report}\n\nMachine: ${machineId}` : report,
+    };
 
-    // 2. Create Trello card title & description
-    const title = `[${llmData.severity} - ${llmData.category}] ${llmData.title}`;
-    const desc = machineId ? `${report}\n\nMachine: ${machineId}` : report;
-
-    const cardRes = await fetch(
-      `https://api.trello.com/1/cards?idList=${listId}&key=${key}&token=${token}&name=${encodeURIComponent(
-        title
-      )}&desc=${encodeURIComponent(desc)}`,
-      { method: "POST" }
+    // 4️⃣ Send to Composio (tool: "trello")
+    const composioResult = await executeComposioTool(
+      "TRELLO_CARD_CREATE_AND_UPDATE",
+      trelloInput,
+      "pg-test-072e1038-d48a-4910-aa33-29da217805f0"
     );
-    const cardData = await cardRes.json();
-    if (!cardRes.ok) {
-      console.error("Trello Card Creation Error:", cardData);
-      throw new Error("Failed to create Trello card");
-    }
-    const cardId = cardData.id;
+    console.log("Composio Result:", composioResult);
 
-    // 3. If photo exists, upload and attach
+    const cardId = composioResult?.data?.id || composioResult?.id;
+
+    // 3️⃣ If photo exists, upload to Cloudinary first
     if (photo) {
       const bytes = await photo.arrayBuffer();
       const buffer = Buffer.from(bytes);
       const base64 = `data:${photo.type};base64,${buffer.toString("base64")}`;
       const uploadRes = await uploadToCloudinary(base64, "reports");
-
-      if (uploadRes?.url) {
-        const attachRes = await fetch(
-          `https://api.trello.com/1/cards/${cardId}/attachments?key=${key}&token=${token}&url=${encodeURIComponent(
-            uploadRes.url
-          )}`,
-          { method: "POST" }
+      if(uploadRes?.url){
+        const attachResult = await executeComposioTool(
+          "TRELLO_ADD_CARDS_ATTACHMENTS_BY_ID_CARD",
+          {
+            idCard: cardId,
+            url: uploadRes.url,
+            name: "Attached Photo",
+          },
+          "pg-test-072e1038-d48a-4910-aa33-29da217805f0"
         );
-        if (!attachRes.ok) {
-          const attachData = await attachRes.json();
-          console.error("Trello Attachment Error:", attachData);
-        }
+        console.log("Attachment Result: ", attachResult);
       }
     }
-
     return NextResponse.json({
       success: true,
-      message: "Report triaged via Gemini and Trello card created.",
-      trelloUrl: cardData.url,
+      message:
+        "Report triaged via Gemini and Trello card created via Composio.",
       llmData,
+      composioResult,
     });
   } catch (err: any) {
     console.error("Error in /api/triage:", err);
