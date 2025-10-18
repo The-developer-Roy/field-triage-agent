@@ -8,11 +8,14 @@
     "start": "next start"
   },
   "dependencies": {
+    "@composio/core": "^0.1.55",
     "@tailwindcss/aspect-ratio": "^0.4.2",
     "@tailwindcss/forms": "^0.5.10",
     "@tailwindcss/typography": "^0.5.19",
     "cloudinary": "^2.7.0",
+    "composio": "^1.0.0",
     "composio-core": "^0.5.39",
+    "eventsource-parser": "^1.1.0",
     "form-data": "^4.0.4",
     "next": "15.5.4",
     "react": "19.1.0",
